@@ -382,6 +382,42 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 6);
     }
 
+    /// Small, runtime-free cross-thread handoff: sized so Miri's data-race detector and weak-memory
+    /// emulation can explore it across many schedules (`-Zmiri-many-seeds`). Boxed values make any
+    /// double-read / use-after-free of a slot a detectable heap error.
+    #[test]
+    fn std_threads_handoff_preserves_order_and_ownership() {
+        const N: usize = if cfg!(miri) { 200 } else { 20_000 };
+        let (mut tx, mut rx) = channel::<Box<usize>>(4);
+        let producer = std::thread::spawn(move || {
+            for i in 0..N {
+                let mut v = Box::new(i);
+                loop {
+                    match tx.try_send(v) {
+                        Ok(()) => break,
+                        Err(TrySendError::Full(back)) => {
+                            v = back;
+                            std::thread::yield_now();
+                        }
+                        Err(TrySendError::Closed(_)) => panic!("consumer vanished"),
+                    }
+                }
+            }
+        });
+        let mut expected = 0;
+        while expected < N {
+            match rx.try_recv() {
+                Some(v) => {
+                    assert_eq!(*v, expected, "FIFO order violated");
+                    expected += 1;
+                }
+                None => std::thread::yield_now(),
+            }
+        }
+        producer.join().unwrap();
+        assert!(rx.is_finished());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cross_thread_stream_with_backpressure() {
         const N: u64 = 200_000;

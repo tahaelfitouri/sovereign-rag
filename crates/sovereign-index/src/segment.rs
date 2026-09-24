@@ -305,7 +305,8 @@ impl Segment {
     /// Dimension mismatch, non-finite query or zero-norm query under cosine.
     pub fn search(&self, query: &[f32], params: &SearchParams) -> Result<Vec<Hit>> {
         let mut scratch = SearchScratch::new();
-        let mut out = Vec::with_capacity(params.k);
+        // `k` is caller-controlled: never size allocations by more than the row count.
+        let mut out = Vec::with_capacity(params.k.min(self.len()));
         self.search_into(&mut scratch, query, params, &mut out)?;
         Ok(out)
     }
@@ -322,7 +323,7 @@ impl Segment {
         out: &mut Vec<Hit>,
     ) -> Result<()> {
         scratch.prepare(query, self.dim(), self.stride(), self.metric, self.kernels)?;
-        scratch.topk.reset(params.k);
+        scratch.topk.reset(params.k.min(self.len()));
         self.search_prepared(&scratch.query, params, &mut scratch.layer, &mut scratch.topk, 0);
         out.clear();
         let ids = self.ids();

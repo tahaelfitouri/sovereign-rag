@@ -7,18 +7,17 @@ lock-free RCU snapshot swaps, and a backpressure-aware ingestion pipeline built 
 lock-free SPSC rings.
 
 ```text
-$ sovereign bench --rows 20000
-Kernels · 1536-d · single core          ns/op   GFLOP/s   speedup
-  cosine · naive scalar                5534.5      1.67      1.0x
-  cosine · avx512                       105.0     87.79     52.7x
-  dot    · avx512                        58.2     52.81     32.0x
+$ sovereign bench --dim 1536 --rows 20000 --queries 200        # median of 4 runs (min–max)
+Kernels · 1536-d · single core           ns/op             speedup vs naive scalar
+  cosine · avx512                        110.6             52.3x   (52.0–60.8x)
+  dot    · avx512                         61.1             31.4x   (28.3–32.8x)
 Search · 20,000 × 1536-d · k=10
-  exact scan (rayon)     p50   3.33 ms   p99   4.29 ms
-  hnsw ef=64             p50  289.6 µs   p99  414.3 µs   recall@10 = 0.996
-  open (mmap + validate) 44.7 µs         (120 MiB segment)
+  exact scan (rayon, 4 threads)          p50 3.89 ms       (3.38–5.11 ms)
+  hnsw ef=64 (1 thread per query)        p50 286 µs        (277–387 µs)   recall@10 0.991–0.998
+  open (mmap + validate)                 45 µs             (42–48 µs, 120 MiB segment)
 ```
 
-<sub>Measured on a 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX-512). See [Benchmarks](#benchmarks) for methodology.</sub>
+<sub>Measured on one shared 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX-512); run-to-run variation on this host is up to ~1.5× for latency. See [Benchmarks](#benchmarks) for methodology.</sub>
 
 ---
 
@@ -179,7 +178,7 @@ $\gamma_{d}\sum|a_ib_i|$ with $\gamma_n \approx n\varepsilon$. With $k$ independ
 accumulators of $L$ lanes, each partial sum only sees $d/(kL)$ terms before the final tree
 reduction, tightening the bound to roughly $(d/(kL) + \log_2(kL))\,\varepsilon\sum|a_ib_i|$ —
 for $d=1536$, AVX-512 with $k=4$: 24 + 6 = 30 terms of error growth instead of 1536. The kernel
-tests check every backend against an `f64` reference with tolerance $10^{-5}\sum|a_ib_i|$.
+tests check every backend against an `f64` reference with tolerance $10^{-5}\sum|a_ib_i| + 10^{-6}$.
 
 **HNSW levels.** A node's top layer is drawn as $\ell = \lfloor -\ln(U)\cdot m_L \rfloor$ with
 $U \sim \mathcal{U}(0,1]$ and $m_L = 1/\ln M$, giving $P(\ell \ge l) = M^{-l}$. Expected search
@@ -198,7 +197,7 @@ Source: [`crates/sovereign-core/src/simd`](crates/sovereign-core/src/simd).
 | `avx512` | AVX-512F | 32 × 512-bit | masked load `vmovups zmm{k}{z}` | 4 acc × 16 lanes = 64 floats/iter |
 | `avx2` | AVX2 + FMA | 16 × 256-bit | scalar (≤ 7 elements) | 4 acc × 8 lanes = 32 floats/iter |
 | `neon` | ASIMD | 32 × 128-bit | scalar (≤ 3 elements) | 4 acc × 4 lanes = 16 floats/iter |
-| `scalar` | baseline | — | — | 8 independent accumulators (LLVM auto-vectorizes to SSE2) |
+| `scalar` | baseline | — | — | 8 independent accumulators (LLVM packs them into SSE2 `mulps`/`addps`; checked by disassembling the release binary) |
 
 **Why four accumulators?** `vfmadd231ps` has ~4 cycles latency and 2 issue ports, so one
 accumulator chain would leave the FMA units ~87% idle. But a dot product needs 2 loads per FMA and
@@ -216,7 +215,8 @@ out-of-bounds access even when the slice ends at a page boundary.
 
 **Dispatch.** Binaries are compiled for the baseline ISA. The first `kernels()` call runs `cpuid`
 and installs a `&'static Kernels` table in a `OnceLock`; hot loops fetch it once and call through
-a function pointer — ~1 ns, perfectly predicted, against ~60–100 ns per 1536-d kernel. A
+a function pointer. That indirect call is expected to be negligible next to a ~60–100 ns 1536-d
+kernel, but the dispatch overhead itself is not separately benchmarked. A
 `&'static Kernels` can only be obtained for a backend the CPU supports (private fields + checked
 constructors), which is the invariant that makes the `unsafe` calls behind the safe API sound.
 
@@ -239,8 +239,8 @@ sit inside `unsafe` blocks.
 ```text
  offset 0      ┌────────────────────────────────────────────┐
                │ SegmentHeader  (192 B = 3 cache lines)     │  #[repr(C, align(64))], Pod
- 4096          ├────────────────────────────────────────────┤  ◄── every section is page aligned:
-               │ vectors   count × stride × f32             │      madvise-able independently,
+ 4096          ├────────────────────────────────────────────┤  ◄── every section is 4 KiB aligned:
+               │ vectors   count × stride × f32             │      madvise-able (per 4 KiB page),
                │           (rows padded to 64 B, L2-normed) │      naturally aligned casts
  align 4096    ├────────────────────────────────────────────┤
                │ ids       count × u64                      │
@@ -286,7 +286,7 @@ measures what happens when you break this (a 4-byte offset makes every ZMM load 
 ```
 
 A neighbor lookup is two multiplies and one bounds-checked slice — no pointers, no per-node
-allocations, and layer 0 (where search spends >90% of its time) is a single dense array. Every id
+allocations, and layer 0 (the only layer searched with the full `ef` beam) is a single dense array. Every id
 read from disk is bounds-checked before use, so a corrupt file yields wrong results, never UB.
 
 ### Ring buffer (pipeline transport)
@@ -383,8 +383,11 @@ cargo bench -p sovereign-core --bench simd_bench -- cosine_1536   # one group
 open target/criterion/report/index.html                           # HTML report
 ```
 
-Median of 50 samples on a 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX-512, shared host — expect
-±10% noise). Throughput counts both operand vectors (`2 × 1536 × 4 B` per call).
+Criterion point estimates (50 samples per benchmark, 2 s measurement, 0.5 s warm-up) from **one run**
+on a 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX-512, shared host). Criterion flagged 6–16% of
+samples as outliers and the run was not repeated, so treat differences below ~10% as noise.
+Throughput counts both operand vectors (`2 × 1536 × 4 B` per call). Reproduce with
+`cargo bench -p sovereign-core --bench simd_bench`; `sovereign simd` prints the detected backend.
 
 **Cosine similarity, 1536-d** — the headline comparison:
 
@@ -426,7 +429,8 @@ This is the measured justification for `AlignedVec` and 64-byte padded rows.
 | 256 | 1.5 MiB (L2) | 48.5 µs (30 GiB/s) | 40.9 µs (36 GiB/s) | 1.19× |
 | 4096 | 24 MiB (LLC/DRAM) | 2.24 ms (10.5 GiB/s) | 1.64 ms (14.3 GiB/s) | 1.36× |
 
-The larger gain on the DRAM-bound case comes from memory-level parallelism: four independent row
+A plausible explanation for the larger gain on the DRAM-bound case (not verified with PMU counters)
+is memory-level parallelism: four independent row
 streams keep more cache misses in flight than one.
 
 **Top-k selection:** 1M candidates through `TopK` in ~1.01 ms for k = 10 and k = 100 —
@@ -434,41 +438,55 @@ streams keep more cache misses in flight than one.
 
 ### End-to-end (`sovereign bench`)
 
-```text
-$ sovereign bench --dim 1536 --rows 20000 --queries 200
-Dataset · 20,000 × 1536-d (clustered gaussian)
-  hnsw build             1.91 s  (10459 inserts/s, 4 threads)
-  segment                120.0 MiB written in 630.03 ms
-  open (mmap + validate) 44.7 µs
+Command: `sovereign bench --dim 1536 --rows 20000 --queries 200` (default seed 42, release
+profile), run **4 times**; values are median (min–max). Queries are issued serially from one
+thread: the exact scan parallelizes internally with rayon (4 threads), each HNSW query uses one
+core. Before timing, one untimed exact scan and one untimed graph search warm the page cache.
+Recall@10 is measured against the exact scan of the same segment; it varies between runs because
+the parallel graph build is not deterministic.
 
-Search · k=10 · 200 queries
-  exact scan (rayon)     p50   3.33 ms  p99   4.29 ms      291 QPS
-  scan bandwidth         36.9 GB/s effective (p50)
-  hnsw ef=32             p50  240.7 µs  p99  358.2 µs     4022 QPS   recall@10 = 0.976
-  hnsw ef=64             p50  289.6 µs  p99  414.3 µs     3304 QPS   recall@10 = 0.996
-  hnsw ef=128            p50  352.8 µs  p99  445.2 µs     2778 QPS   recall@10 = 0.998
+| metric | median | min – max |
+|---|---:|---:|
+| HNSW build (20,000 × 1536-d, m=16, ef_construction=100, 4 threads) | 2.04 s | 2.00 – 2.13 s |
+| open (mmap + validate, 120 MiB segment) | 45.3 µs | 42.1 – 47.9 µs |
+| exact scan p50 / p99 | 3.89 / 6.16 ms | 3.38–5.11 / 5.71–7.73 ms |
+| HNSW ef=32 p50 / p99 | 250 / 411 µs | 244–325 / 315–533 µs |
+| HNSW ef=32 recall@10 | 0.976 | 0.972 – 0.978 |
+| HNSW ef=64 p50 / p99 | 286 / 431 µs | 277–387 / 372–551 µs |
+| HNSW ef=64 recall@10 | 0.997 | 0.991 – 0.998 |
+| HNSW ef=128 p50 / p99 | 370 / 540 µs | 345–455 / 460–744 µs |
+| HNSW ef=128 recall@10 | 0.998 | 0.995 – 0.999 |
+
+* **Opening does O(1) work by construction:** only the header (and the graph header, when
+  present) is read and validated; everything else is paged in lazily. Only one file size
+  (120 MiB) was measured.
+* **HNSW vs exact:** ~13.6× lower median p50 at recall ≈ 0.997, on a *single* core per query,
+  while the exact scan uses all 4 cores.
+* Recall isolates index quality from embedding quality. The data is synthetic (64 Gaussian
+  clusters); recall on real embeddings has not been measured here.
+
+**Ingestion stress test** — the local cargo registry sources. The corpus is machine-specific (it
+depends on which crates happen to be cached), so these numbers are illustrative, not reproducible
+byte-for-byte. Files were already in the page cache. Single run.
+
+```bash
+sovereign ingest ~/.cargo/registry/src --index /tmp/idx --no-sync
+sovereign query -i /tmp/idx -k 3 --repeat 500 "memory mapped file advise random access"
+sovereign query -i /tmp/idx -k 3 --repeat 20 --exact "memory mapped file advise random access"
 ```
-
-* **Opening is O(1):** 44.7 µs for a 120 MiB segment — one header page is validated; the rest is
-  paged in lazily by the kernel.
-* **HNSW vs exact:** ~11× lower p50 latency at recall 0.996, on a *single* core per query
-  (the exact scan uses all 4 cores via rayon).
-* Recall is measured against the exact scan on the same data, so it isolates index quality from
-  embedding quality.
-
-**Ingestion stress test** — the entire local cargo registry (`~/.cargo/registry/src`):
 
 | metric | value |
 |---|---|
-| input | 7,983 files · 109.7 MiB of Rust/TOML/Markdown |
-| chunks | 77,990 (7,381 exact duplicates dropped before embedding) |
-| pipeline wall time | 1.44 s → 76 MiB/s, ~54k chunks/s (hash embedder, 4 workers) |
-| HNSW build | 70,609 × 384-d in 10.3 s (m = 16, ef_construction = 200, 4 threads) |
-| query latency | p50 163 µs / p99 467 µs (HNSW) vs p50 3.2 ms (exact) |
-| peak RSS | 266 MiB |
+| input | 9,452 files · 126.0 MiB of Rust/TOML/Markdown |
+| chunks | 94,511 (11,997 exact duplicates dropped before embedding) |
+| pipeline wall time | 1.60 s → 78.9 MiB/s, ~59k chunks/s (hash embedder, 4 workers) |
+| HNSW build | 82,514 × 384-d in 14.3 s (m = 16, ef_construction = 200, 4 threads) |
+| query latency (500 repeats of **one** query) | p50 144 µs / p99 368 µs (HNSW) |
+| exact scan (20 repeats of the same query) | p50 4.57 ms |
+| peak RSS (`VmHWM`) | 303.6 MiB |
 
 With a transformer embedder the pipeline is bound by the model, not by I/O, chunking or
-indexing; the point of this number is that the engine adds negligible overhead around it.
+indexing; this run only shows that the rest of the engine adds little overhead around the model.
 
 ---
 
@@ -503,7 +521,8 @@ perf script | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
 ```
 
 **Measuring SIMD utilization for real** (Intel PMU counters — names vary by generation, see
-`perf list | grep fp_arith`):
+`perf list | grep fp_arith`). These commands were **not** run for this README: PMU counters are
+usually not exposed inside cloud VMs, including the one used for the numbers above.
 
 ```bash
 perf stat -e fp_arith_inst_retired.scalar_single,\
@@ -527,8 +546,9 @@ per-call overhead dominates and batching (`dot_x4`) pays off.
 
 **`bytemuck` + `#[repr(C)]` instead of `rkyv`.** Everything on disk is a flat array of fixed-width
 scalars. A hand-specified layout with `bytemuck` casts is *truly* zero-copy with an O(1) validation
-cost (one 192-byte header), no archive format coupling and no relative-pointer resolution — opening
-a 10 GB segment touches one page. rkyv is the right tool for pointer-rich object graphs; this
+cost (one 192-byte header, plus the 128-byte graph header when present), no archive format coupling
+and no relative-pointer resolution — opening touches a constant number of pages regardless of file
+size (measured: 42–48 µs for a 120 MiB segment over 4 runs). rkyv is the right tool for pointer-rich object graphs; this
 isn't one.
 
 **Function-pointer dispatch instead of `-C target-cpu=native`.** One portable binary that uses
@@ -544,16 +564,17 @@ buys nothing. Sharding into N rings avoids contention by construction.
 workers, so it needs a concurrent set; the single chunker stage uses plain locals.
 
 **HNSW heuristic selection (Algorithm 4).** Keeps "highway" edges between clusters instead of
-wiring each node only to its densest neighborhood — the main reason recall stays high on clustered
-embedding data.
+wiring each node only to its densest neighborhood, which the HNSW paper (Malkov & Yashunin, §4)
+reports improves recall on clustered data. This repository does not include an ablation.
 
-**Small segments are scanned exactly.** In `Auto` mode, segments under 1024 rows skip the graph:
-a scan is faster at that size and gives 100% recall.
+**Small segments are scanned exactly.** In `Auto` mode, segments under 1024 rows skip the graph and
+get 100% recall. The 1024-row threshold is a heuristic; it has not been tuned by benchmark.
 
 **What's intentionally *not* here (yet):** deletes/tombstones, filtered search, product
 quantization, a GPU searcher, a tree-sitter chunker and a `ratatui` TUI. The `VectorIndex` trait
-and `Embedder` trait are the seams those plug into. The NEON kernels are compile-checked locally
-and executed on the CI's Apple Silicon runner, but the published numbers are x86 only.
+and `Embedder` trait are the seams those plug into. The NEON kernels are compile- and
+clippy-checked for `aarch64-unknown-linux-gnu` but have **not been executed** by the author; the CI
+workflow has a `macos-14` (Apple Silicon) job that runs them. All published numbers are x86_64.
 
 ---
 
@@ -562,17 +583,24 @@ and executed on the CI's Apple Silicon runner, but the published numbers are x86
 ```bash
 cargo test --workspace                          # unit + integration + doc tests
 SOVEREIGN_SIMD=scalar cargo test --workspace    # pin dispatch to one backend
-cargo clippy --workspace --all-targets          # zero warnings
-cargo check -p sovereign-core --target aarch64-unknown-linux-gnu   # NEON path
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sovereign-core --lib --target aarch64-unknown-linux-gnu   # NEON path (compile only)
+cargo +nightly miri test -p sovereign-core --lib                          # UB checks (no mmap tests)
 ```
+
+The pre-merge review — unsafe inventory with per-block coverage, Miri results, storage/ring/recall
+analysis, and which checks ran locally vs only in CI — is in [`docs/REVIEW.md`](docs/REVIEW.md).
 
 Highlights:
 
 * every SIMD backend vs an `f64` reference for **every tail length 0–200** plus common embedding
   sizes, and `dot_x4` vs single-row kernels;
 * parallel flat scan returns *bit-identical* results to a sequential scan (deterministic top-k);
-* HNSW recall@10 ≥ 0.95 on clustered data, self-recall > 99%, deterministic sequential builds;
-* file format round-trip, and detection of header / body / truncation / magic / manifest corruption;
+* exact search reproduces an independent `f64` ranking for all metrics; HNSW recall@10 ≥ 0.95 on
+  clustered data against that `f64` truth; self-recall > 99%; deterministic sequential builds;
+* file format round-trip; header / body / truncation / magic / manifest corruption; forged headers
+  with a *valid* CRC for every structural check; corrupt bodies degrade without panicking; empty
+  segments and stores; crash leftovers ignored on recovery;
 * RCU stress test: concurrent readers during publishes and compactions;
 * SPSC ring: FIFO under wraparound, 200k-message cross-thread stream with backpressure, exactly-once
   drop of undelivered items, close semantics;

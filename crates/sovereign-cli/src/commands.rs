@@ -34,6 +34,12 @@ pub fn ingest(a: &IngestArgs) -> Result<()> {
     let embedder = Arc::new(HashEmbedder::new(a.dim).map_err(|e| anyhow::anyhow!(e))?);
     let config =
         SegmentConfig { dim: a.dim, metric: Metric::Cosine, fingerprint: embedder.fingerprint() };
+    // Validate graph parameters before doing any work (they are otherwise only checked after the
+    // whole pipeline has run, at graph-build time).
+    let opts = write_options(&a.graph);
+    if let Some(p) = &opts.hnsw {
+        p.validate()?;
+    }
     let store = IndexStore::open_or_create(&a.store.index, config)
         .with_context(|| format!("opening store {}", a.store.index.display()))?;
 
@@ -121,7 +127,6 @@ pub fn ingest(a: &IngestArgs) -> Result<()> {
         return Ok(());
     }
 
-    let opts = write_options(&a.graph);
     let sp = ui::spinner(if opts.hnsw.is_some() {
         format!(
             "building HNSW graph over {} vectors + writing segment",
@@ -140,7 +145,10 @@ pub fn ingest(a: &IngestArgs) -> Result<()> {
     if w.has_graph {
         ui::kv("hnsw build", ui::duration(w.build_time));
     }
-    ui::kv("write + fsync", ui::duration(w.write_time));
+    ui::kv(
+        if opts.sync { "write + fsync" } else { "write (no fsync)" },
+        ui::duration(w.write_time),
+    );
     let snap = store.load();
     ui::kv(
         "store",
@@ -151,7 +159,7 @@ pub fn ingest(a: &IngestArgs) -> Result<()> {
             ui::count(snap.len() as u64)
         ),
     );
-    ui::kv("peak rss", ui::rss_bytes().map_or_else(|| "n/a".into(), ui::bytes));
+    ui::kv("peak rss", ui::peak_rss_bytes().map_or_else(|| "n/a".into(), ui::bytes));
     Ok(())
 }
 

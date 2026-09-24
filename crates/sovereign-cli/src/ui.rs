@@ -48,12 +48,21 @@ pub fn count(n: u64) -> String {
     out
 }
 
-/// Resident set size of this process (Linux `/proc/self/status`), if available.
-pub fn rss_bytes() -> Option<u64> {
+fn proc_status_kib(field: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+    let line = status.lines().find(|l| l.starts_with(field))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kib * 1024)
+}
+
+/// Current resident set size of this process (Linux `VmRSS`), if available.
+pub fn rss_bytes() -> Option<u64> {
+    proc_status_kib("VmRSS:")
+}
+
+/// Peak resident set size of this process (Linux `VmHWM`, the high-water mark), if available.
+pub fn peak_rss_bytes() -> Option<u64> {
+    proc_status_kib("VmHWM:")
 }
 
 /// CPU model string (Linux `/proc/cpuinfo`), if available.

@@ -124,6 +124,10 @@ fn latency_line(name: &str, lat: &mut [Duration]) {
 }
 
 pub fn run(a: &BenchArgs) -> Result<()> {
+    anyhow::ensure!(
+        a.dim > 0 && a.rows > 0 && a.queries > 0 && a.k > 0,
+        "--dim, --rows, --queries and -k must all be at least 1"
+    );
     let active = sovereign_core::kernels().backend();
     ui::header("System");
     if let Some(cpu) = ui::cpu_model() {
@@ -215,9 +219,14 @@ pub fn run(a: &BenchArgs) -> Result<()> {
     let mut scratch = SearchScratch::new();
     let mut out = Vec::with_capacity(a.k);
 
-    // Warm the page cache so we measure compute, not first-touch faults.
+    // Warm the page cache (vectors via one exact scan, graph via one graph search) so timings
+    // measure compute, not first-touch page faults.
     let warm = SearchParams::top(a.k).mode(SearchMode::Exact);
     seg.search_into(&mut scratch, &queries[0], &warm, &mut out)?;
+    if seg.has_graph() {
+        let warm = SearchParams::top(a.k).ef(a.ef * 2).mode(SearchMode::Approximate);
+        seg.search_into(&mut scratch, &queries[0], &warm, &mut out)?;
+    }
 
     let exact = SearchParams::top(a.k).mode(SearchMode::Exact);
     let mut truth: Vec<HashSet<u64>> = Vec::with_capacity(queries.len());

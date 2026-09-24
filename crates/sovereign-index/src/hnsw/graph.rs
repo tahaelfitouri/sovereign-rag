@@ -200,3 +200,48 @@ pub(crate) fn encode(g: &BuiltGraph) -> Vec<u8> {
     out[..GRAPH_HEADER_SIZE].copy_from_slice(bytemuck::bytes_of(&header));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hnsw::{build_graph, HnswParams};
+    use sovereign_core::{
+        padded_stride, push_padded_row, AlignedVec, MatrixRef, Metric, Xoshiro256pp,
+    };
+
+    /// Encode → parse → search entirely in memory (no mmap), so Miri can check the zero-copy parse
+    /// and the unchecked-distance traversal of the frozen graph.
+    #[test]
+    fn encoded_graph_roundtrips_and_finds_stored_vectors() {
+        let (n, dim) = if cfg!(miri) { (40, 16) } else { (1000, 32) };
+        let stride = padded_stride(dim).unwrap();
+        let k = sovereign_core::kernels();
+        let mut rng = Xoshiro256pp::seed_from_u64(9);
+        let mut buf = AlignedVec::new();
+        let mut v = vec![0.0; dim];
+        for _ in 0..n {
+            rng.fill_gaussian(&mut v);
+            k.normalize(&mut v).unwrap();
+            push_padded_row(&mut buf, &v, stride).unwrap();
+        }
+        let m = MatrixRef::new(&buf, n, dim, stride).unwrap();
+        let params = HnswParams { parallel: false, ..HnswParams::default() };
+        let built = build_graph(m, Metric::Cosine, &params, k).unwrap();
+        // The file places the graph section 4 KiB aligned; an AlignedVec gives the same guarantee.
+        let bytes = AlignedVec::from_slice(&encode(&built));
+        let g = HnswGraphRef::parse(&bytes, n).unwrap();
+        assert_eq!(g.len(), n);
+        assert!(HnswGraphRef::parse(&bytes, n + 1).is_err());
+
+        let space = Space::new(k, m, Metric::Cosine);
+        let mut scratch = LayerScratch::default();
+        let mut found = 0;
+        for i in 0..n {
+            let mut out = TopK::new(1);
+            // SAFETY: `space` is built over the matrix this graph indexes and rows are padded.
+            unsafe { g.search(&space, m.row_padded(i), 32, &mut scratch, &mut out, 0) };
+            found += usize::from(out.into_sorted_vec().first().map(|h| h.id) == Some(i as u64));
+        }
+        assert!(found * 100 >= n * 95, "self-recall {found}/{n}");
+    }
+}

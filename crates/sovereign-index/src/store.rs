@@ -163,7 +163,8 @@ impl Snapshot {
             self.config.metric,
             sovereign_core::kernels(),
         )?;
-        scratch.topk.reset(params.k);
+        // `k` is caller-controlled: never size the collector by more than the row count.
+        scratch.topk.reset(params.k.min(self.len()));
         let SearchScratch { query: q, topk, layer } = scratch;
         for (ordinal, e) in self.segments.iter().enumerate() {
             e.segment.search_prepared(q, params, layer, topk, (ordinal as u64) << 32);

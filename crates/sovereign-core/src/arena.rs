@@ -320,6 +320,17 @@ mod tests {
     }
 
     #[test]
+    fn zero_sized_allocations_are_aligned_and_do_not_consume_space() {
+        let arena = Arena::with_chunk_size(64);
+        let p = arena.alloc_layout(Layout::from_size_align(0, 32).unwrap());
+        assert_eq!(p.as_ptr() as usize % 32, 0);
+        let unit: &mut () = arena.alloc(());
+        *unit = ();
+        assert_eq!(arena.allocated_bytes(), 0);
+        assert_eq!(arena.capacity_bytes(), 0, "no chunk is allocated for zero-sized requests");
+    }
+
+    #[test]
     fn over_aligned_layout() {
         let arena = Arena::with_chunk_size(64);
         let _ = arena.alloc(1u8);

@@ -543,6 +543,9 @@ mod tests {
         assert_eq!(k.normalize(&mut [0.0; 4]), Err(CoreError::ZeroNorm));
         assert_eq!(k.normalize(&mut [f32::NAN; 4]), Err(CoreError::ZeroNorm));
         assert!(k.try_dot(&[1.0], &[1.0, 2.0]).is_err());
+        assert!(k.try_cosine(&[1.0], &[1.0, 2.0]).is_err());
+        assert_eq!(k.try_dot(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]), Ok(32.0));
+        assert!((k.try_cosine(&[1.0, 0.0], &[1.0, 0.0]).unwrap() - 1.0).abs() < 1e-6);
         assert_eq!(k.score(Metric::L2, &[1.0, 1.0], &[0.0, 0.0]), -2.0);
     }
 

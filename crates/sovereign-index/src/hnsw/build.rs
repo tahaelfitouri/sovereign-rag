@@ -119,7 +119,10 @@ impl Builder<'_> {
                 );
             }
             s.sorted.clear();
-            s.sorted.extend(s.layer.results.drain());
+            // Under concurrent inserts another thread may already have linked `q` into a list
+            // reachable here (its beam from the layer above can contain `q`), so the search can
+            // find `q` itself. Never select a node as its own neighbor.
+            s.sorted.extend(s.layer.results.drain().filter(|c| c.id != q));
             s.sorted.sort_unstable();
             // SAFETY: see above.
             unsafe { select_neighbors(&self.space, &s.sorted, m_layer, &mut s.selected) };
@@ -147,6 +150,9 @@ impl Builder<'_> {
 
     /// Adds the back-link `nb -> q`, re-running the selection heuristic if `nb` is full.
     fn connect(&self, nb: u32, q: u32, layer: usize, m_layer: usize, s: &mut BuildScratch) {
+        if nb == q {
+            return; // no self-loops (see `insert`)
+        }
         let Some(list) = self.nodes[nb as usize].links.get(layer) else { return };
         let mut links = list.lock();
         if links.contains(&q) {
@@ -306,20 +312,22 @@ mod tests {
 
     #[test]
     fn frozen_layout_is_consistent() {
-        let (buf, stride) = dataset(500, 24, 1);
-        let m = MatrixRef::new(&buf, 500, 24, stride).unwrap();
+        // Miri-sized under `cfg(miri)`; the full size natively.
+        let n = if cfg!(miri) { 40 } else { 500 };
+        let (buf, stride) = dataset(n, 24, 1);
+        let m = MatrixRef::new(&buf, n, 24, stride).unwrap();
         let params =
             HnswParams { m: 8, m0: 16, ef_construction: 64, parallel: false, ..Default::default() };
         let g = build_graph(m, Metric::Cosine, &params, sovereign_core::kernels()).unwrap();
-        assert_eq!(g.levels.len(), 500);
-        assert_eq!(g.layer0.len(), 500 * 17);
+        assert_eq!(g.levels.len(), n);
+        assert_eq!(g.layer0.len(), n * 17);
         assert_eq!(g.levels[g.entry_point as usize] as u32, g.max_level);
-        for i in 0..500 {
+        for i in 0..n {
             let len = g.layer0[i * 17] as usize;
             assert!((1..=16).contains(&len), "node {i} has {len} layer-0 links");
             assert!(g.layer0[i * 17 + 1..i * 17 + 1 + len]
                 .iter()
-                .all(|&x| (x as usize) < 500 && x as usize != i));
+                .all(|&x| (x as usize) < n && x as usize != i));
             let lvl = g.levels[i] as usize;
             assert_eq!(g.upper_index[i] == u32::MAX, lvl == 0);
         }
@@ -328,9 +336,27 @@ mod tests {
     }
 
     #[test]
+    fn parallel_build_links_are_valid() {
+        let n = if cfg!(miri) { 48 } else { 2000 };
+        let (buf, stride) = dataset(n, 16, 4);
+        let m = MatrixRef::new(&buf, n, 16, stride).unwrap();
+        let params = HnswParams { m: 6, m0: 12, ef_construction: 24, ..Default::default() };
+        assert!(params.parallel);
+        let g = build_graph(m, Metric::Cosine, &params, sovereign_core::kernels()).unwrap();
+        assert_eq!(g.levels[g.entry_point as usize] as u32, g.max_level);
+        for i in 0..n {
+            let row = &g.layer0[i * 13..(i + 1) * 13];
+            let len = row[0] as usize;
+            assert!((1..=12).contains(&len), "node {i} has {len} layer-0 links");
+            assert!(row[1..=len].iter().all(|&x| (x as usize) < n && x as usize != i));
+        }
+    }
+
+    #[test]
     fn sequential_build_is_deterministic() {
-        let (buf, stride) = dataset(300, 16, 2);
-        let m = MatrixRef::new(&buf, 300, 16, stride).unwrap();
+        let n = if cfg!(miri) { 30 } else { 300 };
+        let (buf, stride) = dataset(n, 16, 2);
+        let m = MatrixRef::new(&buf, n, 16, stride).unwrap();
         let params = HnswParams { parallel: false, ..Default::default() };
         let a = build_graph(m, Metric::Cosine, &params, sovereign_core::kernels()).unwrap();
         let b = build_graph(m, Metric::Cosine, &params, sovereign_core::kernels()).unwrap();

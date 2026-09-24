@@ -115,6 +115,43 @@ mod tests {
     use super::*;
     use sovereign_core::{padded_stride, push_padded_row, AlignedVec, Xoshiro256pp};
 
+    /// Small enough for Miri: covers every unsafe block in `scan_range` (1x4 blocked rows, the
+    /// remainder rows and the L2 path) and checks results against a plain brute force.
+    #[test]
+    fn small_scan_matches_brute_force() {
+        let (rows, dim) = (37, 20); // 37 = 9 blocks of 4 + 1 remainder row
+        let stride = padded_stride(dim).unwrap();
+        let mut rng = Xoshiro256pp::seed_from_u64(5);
+        let mut buf = AlignedVec::new();
+        let mut v = vec![0.0; dim];
+        for _ in 0..rows {
+            rng.fill_gaussian(&mut v);
+            push_padded_row(&mut buf, &v, stride).unwrap();
+        }
+        let m = MatrixRef::new(&buf, rows, dim, stride).unwrap();
+        let mut q = vec![0.0; stride];
+        rng.fill_gaussian(&mut q[..dim]);
+        let k = sovereign_core::kernels();
+        for l2 in [false, true] {
+            let mut got = TopK::new(rows);
+            scan(k, m, &q, l2, &mut got, 7 << 32);
+            let got = got.into_sorted_vec();
+            let mut want: Vec<(f32, u64)> = (0..rows)
+                .map(|r| {
+                    let s =
+                        if l2 { -k.l2_sq(&q, m.row_padded(r)) } else { k.dot(&q, m.row_padded(r)) };
+                    (s, (7 << 32) | r as u64)
+                })
+                .collect();
+            want.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            assert_eq!(got.len(), rows);
+            for (g, w) in got.iter().zip(&want) {
+                assert_eq!(g.id, w.1, "l2={l2}");
+                assert!((g.score - w.0).abs() <= 1e-5 * w.0.abs().max(1.0), "l2={l2}");
+            }
+        }
+    }
+
     #[test]
     fn parallel_scan_matches_sequential_exactly() {
         let dim = 64;

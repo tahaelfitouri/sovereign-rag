@@ -60,10 +60,26 @@ fn write_segment(path: &Path, data: &[Vec<f32>], metric: Metric, opts: &WriteOpt
     Segment::open(path).unwrap()
 }
 
+/// Ground truth computed in plain `f64` arithmetic on the *raw* vectors — deliberately independent
+/// of the SIMD kernels, the stored normalization and the index code under test.
+fn f64_score(metric: Metric, q: &[f32], v: &[f32]) -> f64 {
+    let dot: f64 = q.iter().zip(v).map(|(&a, &b)| f64::from(a) * f64::from(b)).sum();
+    match metric {
+        Metric::Dot => dot,
+        Metric::Cosine => {
+            let nq: f64 = q.iter().map(|&a| f64::from(a).powi(2)).sum();
+            let nv: f64 = v.iter().map(|&b| f64::from(b).powi(2)).sum();
+            dot / (nq.sqrt() * nv.sqrt())
+        }
+        Metric::L2 => {
+            -q.iter().zip(v).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum::<f64>()
+        }
+    }
+}
+
 fn brute_force(data: &[Vec<f32>], q: &[f32], metric: Metric, k: usize) -> Vec<u64> {
-    let kern = kernels();
-    let mut scored: Vec<(f32, u64)> =
-        data.iter().enumerate().map(|(i, v)| (kern.score(metric, q, v), 1000 + i as u64)).collect();
+    let mut scored: Vec<(f64, u64)> =
+        data.iter().enumerate().map(|(i, v)| (f64_score(metric, q, v), 1000 + i as u64)).collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().take(k).map(|(_, id)| id).collect()
 }
@@ -140,6 +156,9 @@ fn hnsw_recall_is_high() {
         hits += out.iter().filter(|h| truth.contains(&h.id)).count();
     }
     let recall = hits as f64 / (queries.len() * k) as f64;
+    eprintln!(
+        "hnsw_recall_is_high: recall@{k} = {recall:.4} (n={n}, dim={dim}, ef=128, 200 queries)"
+    );
     assert!(recall >= 0.95, "recall@{k} = {recall:.3}");
 }
 
@@ -155,6 +174,7 @@ fn every_vector_finds_itself() {
         .enumerate()
         .filter(|(i, v)| seg.search(v, &params).unwrap()[0].id == 1000 + *i as u64)
         .count();
+    eprintln!("every_vector_finds_itself: {found}/{} (ef=64)", data.len());
     assert!(found as f64 / data.len() as f64 > 0.99, "self-recall {found}/3000");
 }
 
