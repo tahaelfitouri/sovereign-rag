@@ -44,8 +44,8 @@ claim of production readiness.
 | Miri: `sovereign-index` HNSW unit tests (no mmap) | local | pass with caveats — see note below |
 | Criterion `simd_bench`, `sovereign bench`, ingest stress run | local | numbers in README |
 | NEON kernels: `cargo clippy -p sovereign-core --lib --target aarch64-unknown-linux-gnu` | **cross-compiled only** | pass (compile/lint only — never executed) |
-| NEON kernels executed on Apple Silicon (`macos-14` job) | **CI-only** | configured in `.github/workflows/ci.yml`; not observed at time of writing |
-| Ubuntu CI matrix, MSRV job, bench-compile job | **CI-only** (mirrors the local runs above) | not observed at time of writing |
+| NEON kernels executed on Apple Silicon (`macos-14` job) | **CI-only** | **pass** on PR #1 CI (commit `3d5dce0`): `sovereign simd` reports `architecture aarch64`, `active neon`; the kernel tests run every supported backend (NEON + scalar) against the `f64` reference. Not executed by the author on real hardware |
+| Ubuntu CI matrix (`auto`/`avx2`/`scalar`), MSRV job, bench-compile job, `fmt + clippy` | **CI** (mirrors the local runs above) | pass on commit `3d5dce0` (the first CI run failed `fmt + clippy`, see F8) |
 
 **Miri note for `sovereign-index`.** Under the default Stacked Borrows model: the sequential HNSW
 build tests, the in-memory graph encode → parse → search test and the small flat-scan test pass
@@ -447,7 +447,8 @@ with an `Io` error naming the file. There is no garbage collection of leftovers 
    grows with the number of chunks in a run.
 7. **Recall** validated only on synthetic data; parallel HNSW builds are non-deterministic; no
    connectivity guarantees after heuristic pruning.
-8. **NEON** never executed by the author; **32-bit, Windows, macOS** untested locally.
+8. **NEON** executed only in CI (Apple Silicon runner), never by the author; **32-bit and Windows**
+   untested; macOS covered only by CI.
 9. **Advisory `flock`** writer lock may not work on network filesystems.
 10. **Absurd inputs** (`SegmentWriter::with_capacity(huge)`, `bench --rows` near `usize::MAX`)
     panic on capacity overflow instead of returning an error.
