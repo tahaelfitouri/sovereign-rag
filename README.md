@@ -388,6 +388,10 @@ on a 4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX-512, shared host). Criterion fla
 samples as outliers and the run was not repeated, so treat differences below ~10% as noise.
 Throughput counts both operand vectors (`2 × 1536 × 4 B` per call). Reproduce with
 `cargo bench -p sovereign-core --bench simd_bench`; `sovereign simd` prints the detected backend.
+These tables were measured with rustc 1.94.1. The scalar kernels were later changed from
+`chunks_exact` to `as_chunks` (a new clippy lint in 1.98); a same-compiler A/B on 1.98.1 showed no
+consistent effect (−4.7% … +7.0%; the same `scalar::dot` function measured +0.7% and +7.0% in two
+groups, i.e. within this host's noise). The SIMD kernels were not changed.
 
 **Cosine similarity, 1536-d** — the headline comparison:
 

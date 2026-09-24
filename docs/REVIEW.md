@@ -7,7 +7,8 @@ claim of production readiness.
 - Reviewed commit range: the full initial import (single root commit) plus the fixes listed in
   [§3](#3-findings-and-fixes-in-this-pr).
 - Host for all local runs: 4-vCPU cloud VM, Intel Xeon @ 2.8 GHz, AVX-512F/AVX2/FMA, Linux 6.18,
-  x86_64. Toolchains: stable `rustc 1.94.1`, MSRV `1.89.0`, nightly `2026-09-23` (Miri only).
+  x86_64. Toolchains: `rustc 1.94.1` for the review runs, then **all gates re-run on `rustc 1.98.1`**
+  (the CI `stable`) after finding F8; MSRV `1.89.0`; nightly `2026-09-23` (Miri only).
 
 ## Contents
 
@@ -30,7 +31,7 @@ claim of production readiness.
 |---|---|---|
 | `cargo fmt --all --check` | local | pass |
 | `cargo check --workspace --all-targets` (stable 1.94.1) | local | pass, 0 warnings |
-| `cargo clippy --workspace --all-targets -- -D warnings` | local | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | local | pass on 1.98.1 and 1.94.1 |
 | `cargo test --workspace` (dispatch: auto → AVX-512) | local | 81 passed, 0 failed |
 | `cargo test --workspace` with `SOVEREIGN_SIMD=avx2` / `scalar` / `avx512` | local | pass (each) |
 | `cargo doc --workspace --no-deps` | local | pass, 0 warnings |
@@ -99,6 +100,7 @@ Only confirmed defects were changed; each fix is minimal and has a regression te
 | F5 | Bench warm-up only touched vector pages; the first timed HNSW configuration paid graph page faults | low (biased p99) | one untimed graph query before timing | re-measured numbers |
 | F6 | **Parallel HNSW build could create self-loops**: a concurrent insert can link `q` into a list reachable from `q`'s own layer search (beams from the layer above are reused as entry points, and distances are layer-independent), so `q` was selected as its own neighbor. Not a memory-safety issue (search skips visited nodes), but each self-loop wastes an adjacency slot and lowers the effective degree | medium (graph quality / recall) | filter `q` out of its own candidates; refuse `connect(q, q)` | `hnsw::build::tests::parallel_build_links_are_valid` (failed 14/300 runs before the fix, 0/1000 after) |
 | F7 | `sovereign ingest --no-sync` labelled its write time "write + fsync" | low (misreported metric) | label reflects the actual mode | manual |
+| F8 | **CI `fmt + clippy` job failed** on the PR: CI's floating `stable` is rustc 1.98, whose clippy added `chunks_exact_to_as_chunks`; the local review toolchain (1.94.1) lacked it, and `-D warnings` made it fatal (6 sites in `simd/scalar.rs`, 1 in the Criterion bench) | CI break | switch to `slice::as_chunks` / `as_chunks_mut` (stable since 1.88, within MSRV). Clippy now clean on 1.98.1 **and** 1.94.1; scalar loops still compile to packed SSE (`mulps`/`addps`, re-checked by disassembly); same-compiler Criterion A/B shows no consistent performance change | CI re-run |
 | T1 | Structural header validation and graph parsing were never exercised: existing corruption tests flip header bytes, which the header CRC rejects first | test gap | forged-header tests with recomputed valid CRC (12 header cases, 8 graph cases) | `malformed_tests::forged_*` |
 | T2 | Exact-search / recall ground truth used the same SIMD kernels as the system under test | test gap | ground truth recomputed in plain `f64` on raw vectors | `index_tests::brute_force` |
 | T3 | Uncovered unsafe paths: `Arena::alloc_layout` zero-size branch; `Kernels::try_dot`/`try_cosine` success paths | test gap | targeted unit tests | `arena::tests::zero_sized_*`, `simd::tests::normalize_and_errors` |
@@ -452,3 +454,6 @@ with an `Io` error naming the file. There is no garbage collection of leftovers 
 11. **Demo embedder** is lexical feature hashing, with measurable hash-collision noise.
 12. **Performance numbers** come from single runs on one shared cloud VM.
 13. **No fuzzing, loom, or sanitizer runs.**
+14. **Toolchain drift.** CI tracks floating `stable` with `-D warnings`, so a new clippy lint can
+    turn CI red without any code change (this happened once, F8). Pinning the CI toolchain would
+    trade that for staleness; left as is.

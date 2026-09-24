@@ -62,9 +62,8 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
     let mut acc = [0.0f32; U];
-    let (ca, cb) = (a.chunks_exact(U), b.chunks_exact(U));
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<U>(), b.as_chunks::<U>());
+    for (x, y) in ca.iter().zip(cb) {
         for j in 0..U {
             acc[j] += x[j] * y[j];
         }
@@ -83,9 +82,8 @@ pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
     let mut acc = [0.0f32; U];
-    let (ca, cb) = (a.chunks_exact(U), b.chunks_exact(U));
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<U>(), b.as_chunks::<U>());
+    for (x, y) in ca.iter().zip(cb) {
         for j in 0..U {
             let d = x[j] - y[j];
             acc[j] += d * d;
@@ -107,9 +105,8 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
     let (mut d, mut na, mut nb) = ([0.0f32; U], [0.0f32; U], [0.0f32; U]);
-    let (ca, cb) = (a.chunks_exact(U), b.chunks_exact(U));
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<U>(), b.as_chunks::<U>());
+    for (x, y) in ca.iter().zip(cb) {
         for j in 0..U {
             d[j] += x[j] * y[j];
             na[j] += x[j] * x[j];

@@ -170,7 +170,7 @@ fn bench_scan(c: &mut Criterion) {
         });
         g.bench_with_input(BenchmarkId::new("blocked_1x4", rows), &rows, |bch, _| {
             bch.iter(|| {
-                for (i, o) in out.chunks_exact_mut(4).enumerate() {
+                for (i, o) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let r = i * 4;
                     let s = best.dot_x4(
                         &q,
