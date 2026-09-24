@@ -1,0 +1,28 @@
+[package]
+name = "sovereign-index"
+description = "Memory-mapped, zero-copy vector segments with SIMD flat search, HNSW and RCU hot-swaps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+sovereign-core = { workspace = true }
+arc-swap = { workspace = true }
+bytemuck = { workspace = true }
+crc32fast = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

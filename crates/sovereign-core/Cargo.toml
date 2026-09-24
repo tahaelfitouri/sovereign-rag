@@ -1,0 +1,26 @@
+[package]
+name = "sovereign-core"
+description = "SIMD distance kernels, cache-aligned buffers, arenas and zero-copy views for sovereign-rag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "simd_bench"
+harness = false
+
+[lints]
+workspace = true
