@@ -13,10 +13,24 @@
 //!   duration (rare: probability `≈ 1/M` per level), so the graph's top never changes under a
 //!   concurrent top-level insert.
 //!
-//! Races between inserts only affect *which* edges are chosen (a concurrent insert may not see a
-//! node that is still being linked), which perturbs graph quality negligibly — the same trade
-//! every production HNSW makes. With `parallel = false` the build is fully deterministic for a
-//! given seed.
+//! # Publication protocol
+//!
+//! An insert of `q` runs in two phases (see `docs/adr/0001-hnsw-concurrent-insert-publication.md`):
+//!
+//! 1. **Link out** — for every layer, top-down: search, select neighbors, set `q`'s own list.
+//! 2. **Publish** — only then add the back-links `nb → q` on every layer.
+//!
+//! Until phase 2, no list points to `q`, so no other insert can reach it. This rules out two
+//! failure modes that per-list locking alone does not (issue #2): another insert starting its
+//! layer-0 search from `q` while `q`'s layer-0 list is still empty (a dead end that yields a node
+//! with a single link), and `q` later overwriting a back-link that another insert had already
+//! added to its list (which orphaned that node). Deferring publication does not change the
+//! sequential algorithm: a layer's search never reads the lists that the deferred back-links
+//! modify, so sequential builds are identical to publishing layer by layer.
+//!
+//! Remaining races only affect *which* edges are chosen (inserts running at the same time cannot
+//! see each other), which perturbs graph quality negligibly — the same trade every production
+//! HNSW makes. With `parallel = false` the build is fully deterministic for a given seed.
 
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -79,6 +93,8 @@ struct BuildScratch {
     selected: Vec<Cand>,
     prune: Vec<Cand>,
     pruned: Vec<Cand>,
+    /// Back-links `(layer, neighbor)` deferred until `q`'s own lists are complete.
+    publish: Vec<(usize, u32)>,
 }
 
 impl Builder<'_> {
@@ -104,6 +120,8 @@ impl Builder<'_> {
 
         s.entry.clear();
         s.entry.push(cur);
+        s.publish.clear();
+        // Phase 1 — link out: set `q`'s own list on every layer. Nothing points to `q` yet.
         for layer in (0..=level.min(top)).rev() {
             let m_layer = if layer == 0 { self.params.m0 } else { self.params.m };
             // SAFETY: see above.
@@ -119,9 +137,8 @@ impl Builder<'_> {
                 );
             }
             s.sorted.clear();
-            // Under concurrent inserts another thread may already have linked `q` into a list
-            // reachable here (its beam from the layer above can contain `q`), so the search can
-            // find `q` itself. Never select a node as its own neighbor.
+            // Defensive: with deferred publication `q` is unreachable during its own search, so
+            // this filter should never drop anything; it guards against self-loops regardless.
             s.sorted.extend(s.layer.results.drain().filter(|c| c.id != q));
             s.sorted.sort_unstable();
             // SAFETY: see above.
@@ -132,14 +149,19 @@ impl Builder<'_> {
                 own.clear();
                 own.extend(s.selected.iter().map(|c| c.id));
             }
-            for i in 0..s.selected.len() {
-                let nb = s.selected[i].id;
-                self.connect(nb, q, layer, m_layer, s);
-            }
+            s.publish.extend(s.selected.iter().map(|c| (layer, c.id)));
             // Distances to `q` are layer-independent, so the whole beam seeds the next layer
             // without recomputation (the paper's `ep ← W`).
             core::mem::swap(&mut s.entry, &mut s.sorted);
         }
+
+        // Phase 2 — publish: only now can other inserts reach `q`, and its lists are complete.
+        let publish = core::mem::take(&mut s.publish);
+        for &(layer, nb) in &publish {
+            let m_layer = if layer == 0 { self.params.m0 } else { self.params.m };
+            self.connect(nb, q, layer, m_layer, s);
+        }
+        s.publish = publish; // keep the allocation for the next insert
 
         if let Some(mut guard) = entry_guard {
             if level > guard.1 {
@@ -300,6 +322,91 @@ mod tests {
             push_padded_row(&mut buf, &v, stride).unwrap();
         }
         (buf, stride)
+    }
+
+    /// Nodes with no directed path from the entry point over any layer. A search can never return
+    /// such a node, whatever `ef` is (issue #2).
+    fn unreachable_nodes(g: &BuiltGraph) -> Vec<u32> {
+        let n = g.levels.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let neighbors = |u: usize, layer: usize| -> &[u32] {
+            let (row, w) = if layer == 0 {
+                (u, g.m0 + 1)
+            } else {
+                (g.upper_index[u] as usize + layer - 1, g.m + 1)
+            };
+            let list = if layer == 0 { &g.layer0 } else { &g.upper };
+            let row = &list[row * w..(row + 1) * w];
+            &row[1..=row[0] as usize]
+        };
+        let mut seen = vec![false; n];
+        let mut stack = vec![g.entry_point as usize];
+        seen[g.entry_point as usize] = true;
+        while let Some(u) = stack.pop() {
+            for layer in 0..=g.levels[u] as usize {
+                for &v in neighbors(u, layer) {
+                    if !seen[v as usize] {
+                        seen[v as usize] = true;
+                        stack.push(v as usize);
+                    }
+                }
+            }
+        }
+        (0..n as u32).filter(|&u| !seen[u as usize]).collect()
+    }
+
+    fn build_in_pool(threads: usize, m: MatrixRef<'_>, params: &HnswParams) -> BuiltGraph {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| build_graph(m, Metric::Cosine, params, sovereign_core::kernels()).unwrap())
+    }
+
+    /// Regression test for issue #2: a node must not become visible to other inserts before its
+    /// own adjacency lists are complete. An oversubscribed pool widens the race window; before the
+    /// fix, every 16-thread build of this dataset left 20+ of its 3000 nodes unreachable.
+    #[test]
+    fn parallel_build_has_no_unreachable_nodes() {
+        let (n, dim, threads, builds) = if cfg!(miri) { (64, 16, 4, 1) } else { (3000, 32, 16, 3) };
+        let (buf, stride) = dataset(n, dim, 6);
+        let m = MatrixRef::new(&buf, n, dim, stride).unwrap();
+        let params = HnswParams::default();
+        assert!(params.parallel);
+        for b in 0..builds {
+            let orphans = unreachable_nodes(&build_in_pool(threads, m, &params));
+            assert!(
+                orphans.is_empty(),
+                "build {b}: {} of {n} nodes unreachable from the entry point, e.g. {:?}",
+                orphans.len(),
+                &orphans[..orphans.len().min(8)]
+            );
+        }
+    }
+
+    /// With a single worker, rayon runs `1..n` in order, so the parallel code path must reproduce
+    /// the sequential graph exactly: any concurrency-related change to `insert` must keep the
+    /// algorithm itself unchanged.
+    #[test]
+    fn single_thread_parallel_build_matches_sequential() {
+        let n = if cfg!(miri) { 40 } else { 1000 };
+        let (buf, stride) = dataset(n, 24, 7);
+        let m = MatrixRef::new(&buf, n, 24, stride).unwrap();
+        let seq = build_graph(
+            m,
+            Metric::Cosine,
+            &HnswParams { parallel: false, ..HnswParams::default() },
+            sovereign_core::kernels(),
+        )
+        .unwrap();
+        let par = build_in_pool(1, m, &HnswParams::default());
+        assert_eq!((seq.entry_point, seq.max_level), (par.entry_point, par.max_level));
+        assert_eq!(seq.layer0, par.layer0);
+        assert_eq!(seq.upper_index, par.upper_index);
+        assert_eq!(seq.upper, par.upper);
+        assert!(unreachable_nodes(&seq).is_empty());
     }
 
     #[test]
