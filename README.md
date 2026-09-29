@@ -6,6 +6,10 @@ runtime dispatch, a concurrent HNSW index that is searched *directly out of the 
 lock-free RCU snapshot swaps, and a backpressure-aware ingestion pipeline built on custom
 lock-free SPSC rings.
 
+> [!NOTE]
+> The initial implementation was generated with Claude Code under my direction.
+> I'm now working through the codebase module by module to understand, test, and rewrite it.
+
 ```text
 $ sovereign bench --dim 1536 --rows 20000 --queries 200        # median of 4 runs (min–max)
 Kernels · 1536-d · single core           ns/op             speedup vs naive scalar
