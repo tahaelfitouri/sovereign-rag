@@ -178,6 +178,26 @@ fn every_vector_finds_itself() {
     assert!(found as f64 / data.len() as f64 > 0.99, "self-recall {found}/3000");
 }
 
+/// Regression test for issue #2 (orphaned nodes from the parallel HNSW build). Sixteen workers on
+/// a small machine maximize interleaving; before the fix this configuration found only
+/// 2927–2983 of 3000 vectors.
+#[test]
+fn every_vector_finds_itself_with_oversubscribed_parallel_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self16.srag");
+    let data = random_vectors(3000, 32, 6);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(16).build().unwrap();
+    let seg = pool.install(|| write_segment(&path, &data, Metric::Cosine, &fast_write()));
+    let params = SearchParams::top(1).ef(64).mode(SearchMode::Approximate);
+    let found = data
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| seg.search(v, &params).unwrap()[0].id == 1000 + *i as u64)
+        .count();
+    eprintln!("every_vector_finds_itself_with_oversubscribed_parallel_build: {found}/3000");
+    assert!(found >= 2997, "self-recall {found}/3000 with a 16-thread build");
+}
+
 #[test]
 fn writer_rejects_bad_input() {
     let mut w = SegmentWriter::new(cfg(4, Metric::Cosine)).unwrap();

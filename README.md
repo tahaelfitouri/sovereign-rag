@@ -342,6 +342,9 @@ zero errors.
   first → no lock-order cycle, no deadlock.
 * Inserts that raise the graph's top layer hold the entry-point lock for their duration (rare:
   probability ≈ 1/M per level) — the same scheme as hnswlib.
+* Two-phase insert: a node's own lists on every layer are set *before* any back-link to it is
+  published, so no concurrent insert can reach a half-built node or have its link to it erased
+  ([ADR 0001](docs/adr/0001-hnsw-concurrent-insert-publication.md), issue #2).
 * `parallel: false` gives a bit-for-bit deterministic graph for a given seed (tested).
 
 ### Pipeline backpressure
@@ -601,7 +604,8 @@ Highlights:
   sizes, and `dot_x4` vs single-row kernels;
 * parallel flat scan returns *bit-identical* results to a sequential scan (deterministic top-k);
 * exact search reproduces an independent `f64` ranking for all metrics; HNSW recall@10 ≥ 0.95 on
-  clustered data against that `f64` truth; self-recall > 99%; deterministic sequential builds;
+  clustered data against that `f64` truth; self-recall > 99%; every node reachable from the entry
+  point after oversubscribed (16-thread) parallel builds; deterministic sequential builds;
 * file format round-trip; header / body / truncation / magic / manifest corruption; forged headers
   with a *valid* CRC for every structural check; corrupt bodies degrade without panicking; empty
   segments and stores; crash leftovers ignored on recovery;
