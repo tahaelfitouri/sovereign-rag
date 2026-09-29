@@ -1,0 +1,30 @@
+[package]
+name = "sovereign-cli"
+description = "Command-line interface for the sovereign-rag engine: ingest, query, inspect, benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "sovereign"
+path = "src/main.rs"
+
+[dependencies]
+sovereign-core = { workspace = true }
+sovereign-index = { workspace = true }
+sovereign-pipeline = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+console = { workspace = true }
+indicatif = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

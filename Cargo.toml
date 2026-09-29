@@ -1,0 +1,88 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sovereign-core",
+    "crates/sovereign-index",
+    "crates/sovereign-pipeline",
+    "crates/sovereign-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# 1.89 is the first stable release with the AVX-512 intrinsics in `core::arch`.
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/tahaelfitouri/sovereign-rag"
+authors = ["Taha Elfitouri"]
+keywords = ["rag", "vector-search", "simd", "hnsw", "mmap"]
+categories = ["database-implementations", "science", "concurrency"]
+
+# Versions are caret requirements; the committed `Cargo.lock` is the actual pin.
+# (`=x.y.z` pins in library manifests cause resolver conflicts for downstream users.)
+[workspace.dependencies]
+sovereign-core = { path = "crates/sovereign-core", version = "0.1.0" }
+sovereign-index = { path = "crates/sovereign-index", version = "0.1.0" }
+sovereign-pipeline = { path = "crates/sovereign-pipeline", version = "0.1.0" }
+
+# Zero-copy / memory
+bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
+memmap2 = "0.9.11"
+crc32fast = "1.5.2"
+memchr = "2.8.3"
+
+# Concurrency
+arc-swap = "1.9.2"
+crossbeam-utils = "0.8.23"
+dashmap = "6.1.0"
+parking_lot = "0.12.5"
+rayon = "1.12.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+tokio-stream = "0.1.19"
+futures = "0.3.34"
+
+# Errors / observability
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.6.7", features = ["derive", "env"] }
+indicatif = "0.18.6"
+console = "0.16.6"
+
+# Dev
+criterion = { version = "0.8.2", features = ["html_reports"] }
+proptest = "1.11.0"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+# `cargo build --profile profiling` — full symbols for perf/flamegraph, release codegen.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+# Tests exercise SIMD kernels and HNSW builds; unoptimized intrinsics are ~50x slower.
+# Debug assertions and overflow checks stay ON.
+[profile.test]
+opt-level = 2

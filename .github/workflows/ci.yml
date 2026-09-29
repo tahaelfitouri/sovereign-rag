@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.os }}, SIMD=${{ matrix.simd }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64: the kernel tests exercise every backend the runner supports; the matrix
+          # additionally pins the global dispatch so index/pipeline tests run on each path.
+          - { os: ubuntu-latest, simd: auto }
+          - { os: ubuntu-latest, simd: avx2 }
+          - { os: ubuntu-latest, simd: scalar }
+          # Apple Silicon: executes the NEON kernels natively.
+          - { os: macos-14, simd: auto }
+    env:
+      SOVEREIGN_SIMD: ${{ matrix.simd }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo run --release -p sovereign-cli -- simd
+
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      # `+1.89` is required: rust-toolchain.toml would otherwise override the toolchain to stable.
+      - run: cargo +1.89 check --workspace
+
+  bench-compile:
+    name: benches compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p sovereign-core --no-run

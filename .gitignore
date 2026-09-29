@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.srag
+*.srag.tmp*
+/flamegraph*.svg
+perf.data*
+/.sovereign*
