@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::hint::black_box;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -22,14 +21,6 @@ use sovereign_index::{
 };
 
 use crate::{ui, BenchArgs};
-
-/// Removes the benchmark directory on exit (including on error).
-struct TempDir(PathBuf);
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// Times `f` over enough iterations to run for roughly `budget`, returning ns per call.
 fn time_per_call(budget: Duration, mut f: impl FnMut() -> f32) -> f64 {
@@ -171,9 +162,8 @@ pub fn run(a: &BenchArgs) -> Result<()> {
     ui::kv("generate + normalize", ui::duration(t.elapsed()));
     ui::kv("staging memory", ui::bytes(writer.memory_bytes() as u64));
 
-    let dir = TempDir(std::env::temp_dir().join(format!("sovereign-bench-{}", std::process::id())));
-    std::fs::create_dir_all(&dir.0)?;
-    let path = dir.0.join("bench.srag");
+    let dir = tempfile::Builder::new().prefix("sovereign-bench-").tempdir()?;
+    let path = dir.path().join("bench.srag");
     let opts = WriteOptions {
         hnsw: (!a.no_hnsw)
             .then(|| HnswParams { ef_construction: a.ef_construction, ..HnswParams::with_m(a.m) }),

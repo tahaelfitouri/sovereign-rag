@@ -39,7 +39,7 @@ use sovereign_core::{padded_stride, Metric, TopK};
 use crate::error::{IndexError, Result};
 use crate::query::{SearchParams, SearchScratch};
 use crate::segment::{OpenOptions, Segment};
-use crate::writer::{sync_dir, SegmentConfig, SegmentWriter, WriteOptions, WriteReport};
+use crate::writer::{sync_dir, SegmentConfig, SegmentWriter, TempGuard, WriteOptions, WriteReport};
 
 const MANIFEST: &str = "MANIFEST";
 const LOCK: &str = "LOCK";
@@ -240,8 +240,9 @@ impl IndexStore {
         let snapshot = Snapshot { generation: 0, config, segments: Vec::new() };
         let store =
             Self::from_parts(dir.to_path_buf(), config, snapshot, 0, OpenOptions::default());
-        store.acquire_writer_lock()?;
+        store.acquire_writer_lock(true)?;
         store.write_manifest(&store.current.load())?;
+        sync_dir(dir)?;
         Ok(store)
     }
 
@@ -339,7 +340,11 @@ impl IndexStore {
         Ok(SearchResults { snapshot, hits })
     }
 
-    fn acquire_writer_lock(&self) -> Result<()> {
+    fn acquire_writer_lock(&self, creating: bool) -> Result<()> {
+        if self.writer_lock.get().is_some() {
+            return Ok(());
+        }
+        let _g = self.publish.lock();
         if self.writer_lock.get().is_some() {
             return Ok(());
         }
@@ -352,6 +357,28 @@ impl IndexStore {
             .map_err(|e| IndexError::io(&path, e))?;
         match file.try_lock() {
             Ok(()) => {
+                let manifest_path = self.dir.join(MANIFEST);
+                let current = self.current.load();
+                match manifest_path.try_exists().map_err(|e| IndexError::io(&manifest_path, e))? {
+                    true if !creating => {
+                        let manifest = read_manifest(&self.dir)?;
+                        if current.generation != manifest.generation
+                            || self.config != manifest.config
+                            || self.next_segment_id.load(Ordering::Relaxed) != manifest.next_segment
+                            || current.segments.len() != manifest.segments.len()
+                        {
+                            return Err(IndexError::InvalidConfig(
+                                "store changed since opening; reopen before writing".into(),
+                            ));
+                        }
+                    }
+                    false if creating => {}
+                    _ => {
+                        return Err(IndexError::InvalidConfig(
+                            "store changed since opening; reopen before writing".into(),
+                        ));
+                    }
+                }
                 let _ = self.writer_lock.set(file);
                 Ok(())
             }
@@ -367,10 +394,29 @@ impl IndexStore {
         self.dir.join(format!("seg-{id:010}.srag"))
     }
 
+    fn allocate_segment_id(&self) -> Result<u64> {
+        let mut id = self.next_segment_id.load(Ordering::Relaxed);
+        loop {
+            let next = id
+                .checked_add(1)
+                .ok_or_else(|| IndexError::InvalidConfig("segment ids exhausted".into()))?;
+            match self.next_segment_id.compare_exchange_weak(
+                id,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(id),
+                Err(current) => id = current,
+            }
+        }
+    }
+
     /// Writes `writer` as a new segment and atomically publishes it.
     ///
     /// # Errors
-    /// Config mismatch, empty writer, I/O or validation failures. On error the store is unchanged.
+    /// Config mismatch, empty writer, I/O or validation failures. A directory sync error can
+    /// occur after the new snapshot is visible. Check the store before retrying.
     pub fn add_segment(&self, writer: &SegmentWriter, opts: &WriteOptions) -> Result<WriteReport> {
         if *writer.config() != self.config {
             return Err(IndexError::Incompatible("writer config differs from store config".into()));
@@ -378,8 +424,8 @@ impl IndexStore {
         if writer.is_empty() {
             return Err(IndexError::InvalidConfig("refusing to publish an empty segment".into()));
         }
-        self.acquire_writer_lock()?;
-        let id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        self.acquire_writer_lock(false)?;
+        let id = self.allocate_segment_id()?;
         let path = self.segment_path(id);
         let report = writer.write(&path, opts)?;
         let entry = SegmentEntry { id, segment: Arc::new(self.open_new(&path)?) };
@@ -388,7 +434,7 @@ impl IndexStore {
         let cur = self.current.load_full();
         let mut segments = cur.segments.clone();
         segments.push(entry);
-        self.publish_locked(&cur, segments, &[path])?;
+        self.publish_locked(&cur, segments, &[path], sync_dir)?;
         tracing::info!(segment = id, rows = report.rows, "published segment");
         Ok(report)
     }
@@ -408,16 +454,26 @@ impl IndexStore {
         cur: &Snapshot,
         segments: Vec<SegmentEntry>,
         new_files: &[PathBuf],
+        sync: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
-        let next = Snapshot { generation: cur.generation + 1, config: self.config, segments };
-        if let Err(e) = self.write_manifest(&next) {
+        let result = cur
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| IndexError::InvalidConfig("manifest generation exhausted".into()))
+            .and_then(|generation| {
+                let next = Snapshot { generation, config: self.config, segments };
+                self.write_manifest(&next)?;
+                self.current.store(Arc::new(next));
+                Ok(())
+            });
+        if let Err(e) = result {
             for f in new_files {
                 let _ = fs::remove_file(f);
             }
             return Err(e);
         }
-        self.current.store(Arc::new(next));
-        Ok(())
+        // The manifest is already visible. Its segments must survive even if sync fails.
+        sync(&self.dir)
     }
 
     /// Merges every live segment into one (rebuilding the graph) and swaps it in atomically.
@@ -426,14 +482,14 @@ impl IndexStore {
     /// Returns `None` if there is nothing to compact (fewer than two segments).
     ///
     /// # Errors
-    /// A compaction already in progress, I/O or validation failures. On error the store is
-    /// unchanged.
+    /// A compaction already in progress, I/O or validation failures. A directory sync error can
+    /// occur after the compacted snapshot is visible. Old segments are retained in that case.
     pub fn compact(&self, opts: &WriteOptions) -> Result<Option<WriteReport>> {
         if self.compacting.swap(true, Ordering::AcqRel) {
             return Err(IndexError::InvalidConfig("a compaction is already running".into()));
         }
         let _flag = FlagGuard(&self.compacting);
-        self.acquire_writer_lock()?;
+        self.acquire_writer_lock(false)?;
 
         let base = self.snapshot();
         if base.segments.len() < 2 {
@@ -447,7 +503,7 @@ impl IndexStore {
                 writer.push_prepared(id, m.row_padded(row), seg.payload(row)?)?;
             }
         }
-        let id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.allocate_segment_id()?;
         let path = self.segment_path(id);
         let report = writer.write(&path, opts)?;
         let merged = SegmentEntry { id, segment: Arc::new(self.open_new(&path)?) };
@@ -460,7 +516,7 @@ impl IndexStore {
             let cur = self.current.load_full();
             let mut segments = vec![merged];
             segments.extend(cur.segments.iter().filter(|e| !replaced.contains(&e.id)).cloned());
-            self.publish_locked(&cur, segments, &[path])?;
+            self.publish_locked(&cur, segments, &[path], sync_dir)?;
         }
         // Old files may still be mapped by in-flight readers; unlinking is safe on POSIX (the inode
         // lives until the last munmap). On platforms that refuse, the orphan is merely left behind.
@@ -495,14 +551,12 @@ impl IndexStore {
         let _ = writeln!(text, "checksum {:08x}", crc32fast::hash(text.as_bytes()));
 
         let path = self.dir.join(MANIFEST);
-        let tmp = self.dir.join(format!(".{MANIFEST}.tmp-{}", std::process::id()));
-        let io = |e| IndexError::io(&tmp, e);
-        let mut f = File::create(&tmp).map_err(io)?;
+        let (mut f, tmp) = TempGuard::create(&path)?;
+        let io = |e| IndexError::io(tmp.path(), e);
         f.write_all(text.as_bytes()).map_err(io)?;
         f.sync_all().map_err(io)?;
         drop(f);
-        fs::rename(&tmp, &path).map_err(|e| IndexError::io(&path, e))?;
-        sync_dir(&self.dir)
+        tmp.rename(&path)
     }
 }
 
@@ -532,6 +586,7 @@ fn read_manifest(dir: &Path) -> Result<Manifest> {
     let (mut dim, mut metric, mut fingerprint, mut generation, mut next) =
         (None, None, None, None, None);
     let mut segments = Vec::new();
+    let mut ids = HashSet::new();
     for line in lines {
         let mut parts = line.split_whitespace();
         match (parts.next(), parts.next(), parts.next()) {
@@ -542,8 +597,11 @@ fn read_manifest(dir: &Path) -> Result<Manifest> {
             (Some("next-segment"), Some(v), None) => next = v.parse::<u64>().ok(),
             (Some("segment"), Some(id), Some(name)) => {
                 let id = id.parse::<u64>().map_err(|_| bad("bad segment id"))?;
-                if name.contains('/') || name.contains('\\') || name.starts_with('.') {
-                    return Err(bad("segment name must be a plain file name"));
+                if name != format!("seg-{id:010}.srag") || parts.next().is_some() {
+                    return Err(bad("invalid segment filename or extra fields"));
+                }
+                if !ids.insert(id) {
+                    return Err(bad("duplicate segment id"));
                 }
                 segments.push((id, name.to_owned()));
             }
@@ -582,4 +640,32 @@ fn check_compatible(config: &StoreConfig, seg: &Segment) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn manifest_sync_failure_keeps_published_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig { dim: 8, metric: Metric::Dot, fingerprint: 0 };
+        let store = IndexStore::open_or_create(dir.path(), config).unwrap();
+        let mut writer = store.writer().unwrap();
+        writer.push(42, &[1.0; 8], None).unwrap();
+        let id = store.allocate_segment_id().unwrap();
+        let path = store.segment_path(id);
+        writer.write(&path, &WriteOptions::default()).unwrap();
+        let entry = SegmentEntry { id, segment: Arc::new(store.open_new(&path).unwrap()) };
+
+        let _guard = store.publish.lock();
+        let result = store.publish_locked(&store.snapshot(), vec![entry], &[path], |dir| {
+            Err(IndexError::io(dir, std::io::Error::other("injected sync failure")))
+        });
+        assert!(result.is_err());
+        assert_eq!(store.load().generation(), 1);
+        let reopened = IndexStore::open(dir.path(), OpenOptions::default()).unwrap();
+        assert_eq!(reopened.load().segments()[0].segment.ids(), &[42]);
+    }
 }

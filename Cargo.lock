@@ -1012,6 +1012,7 @@ dependencies = [
  "sovereign-core",
  "sovereign-index",
  "sovereign-pipeline",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

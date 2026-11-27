@@ -340,12 +340,56 @@ fn store_rejects_second_writer_process() {
 }
 
 #[test]
+fn stale_store_cannot_overwrite_a_newer_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let active = IndexStore::open_or_create(dir.path(), cfg(8, Metric::Dot)).unwrap();
+    let stale = IndexStore::open(dir.path(), Default::default()).unwrap();
+    let mut first = active.writer().unwrap();
+    first.push(1, &[1.0; 8], None).unwrap();
+    active.add_segment(&first, &flat_write()).unwrap();
+    drop(active);
+
+    let mut second = stale.writer().unwrap();
+    second.push(2, &[1.0; 8], None).unwrap();
+    assert!(stale.add_segment(&second, &flat_write()).is_err());
+    assert!(stale.compact(&flat_write()).is_err());
+
+    let reopened = IndexStore::open(dir.path(), Default::default()).unwrap();
+    assert_eq!(reopened.load().segments()[0].segment.ids(), &[1]);
+    reopened.add_segment(&second, &flat_write()).unwrap();
+    assert_eq!(reopened.load().len(), 2);
+}
+
+#[test]
 fn manifest_tampering_is_detected() {
     let dir = tempfile::tempdir().unwrap();
     IndexStore::open_or_create(dir.path(), cfg(8, Metric::Dot)).unwrap();
     let path = dir.path().join("MANIFEST");
     let text = fs::read_to_string(&path).unwrap().replace("dim 8", "dim 9");
     fs::write(&path, text).unwrap();
+    assert!(matches!(
+        IndexStore::open(dir.path(), Default::default()),
+        Err(IndexError::Manifest { .. })
+    ));
+}
+
+#[test]
+fn manifest_rejects_duplicate_segment_entries_with_valid_checksum() {
+    use std::fmt::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = IndexStore::open_or_create(dir.path(), cfg(8, Metric::Dot)).unwrap();
+    let mut writer = store.writer().unwrap();
+    writer.push(1, &[1.0; 8], None).unwrap();
+    store.add_segment(&writer, &flat_write()).unwrap();
+    let path = dir.path().join("MANIFEST");
+    let text = fs::read_to_string(&path).unwrap();
+    let (body, _) = text.rsplit_once("checksum ").unwrap();
+    let entry = body.lines().find(|line| line.starts_with("segment ")).unwrap();
+    let mut body = format!("{body}{entry}\n");
+    let checksum = crc32fast::hash(body.as_bytes());
+    writeln!(body, "checksum {checksum:08x}").unwrap();
+    fs::write(&path, body).unwrap();
     assert!(matches!(
         IndexStore::open(dir.path(), Default::default()),
         Err(IndexError::Manifest { .. })

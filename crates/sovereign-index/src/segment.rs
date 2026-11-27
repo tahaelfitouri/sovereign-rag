@@ -89,13 +89,21 @@ impl Segment {
 
     /// Opens and validates a segment.
     ///
+    /// Use a trusted file that stays immutable for the lifetime of the segment and any
+    /// snapshots that hold it. Keep the index directory under trusted ownership. Concurrent
+    /// in-place writes or truncation invalidate the memory mapping.
+    ///
     /// # Errors
     /// As [`open`](Self::open), plus body checksum mismatch when `verify_checksum` is set and
     /// `mlock`/`madvise` failures when requested.
     pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path).map_err(|e| IndexError::io(&path, e))?;
-        let len = file.metadata().map_err(|e| IndexError::io(&path, e))?.len();
+        let metadata = file.metadata().map_err(|e| IndexError::io(&path, e))?;
+        if !metadata.is_file() {
+            return Err(IndexError::corrupt(&path, "segment must be a regular file"));
+        }
+        let len = metadata.len();
         if len < HEADER_SIZE as u64 {
             return Err(IndexError::corrupt(&path, "file shorter than header"));
         }
@@ -112,7 +120,10 @@ impl Segment {
         // External tampering with published files is outside this contract (as for LMDB et al.).
         let mmap = unsafe { mo.map(&file) }.map_err(|e| IndexError::io(&path, e))?;
 
-        let header: SegmentHeader = bytemuck::pod_read_unaligned(&mmap[..HEADER_SIZE]);
+        let header_bytes = mmap
+            .get(..HEADER_SIZE)
+            .ok_or_else(|| IndexError::corrupt(&path, "mapping shorter than header"))?;
+        let header: SegmentHeader = bytemuck::pod_read_unaligned(header_bytes);
         let metric = validate(&path, &header, mmap.len() as u64)?;
 
         let seg = Self { mmap, header, metric, path, kernels: sovereign_core::kernels() };
