@@ -290,7 +290,25 @@ impl SegmentWriter {
 }
 
 /// Deletes the temp file on drop unless disarmed (i.e. on every error path).
-struct TempGuard(Option<PathBuf>);
+pub(crate) struct TempGuard(Option<PathBuf>);
+
+impl TempGuard {
+    pub(crate) fn create(destination: &Path) -> Result<(File, Self)> {
+        let path = temp_path(destination);
+        let file = File::create_new(&path).map_err(|e| IndexError::io(&path, e))?;
+        Ok((file, Self(Some(path))))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.0.as_deref().expect("temporary file still owned")
+    }
+
+    pub(crate) fn rename(mut self, destination: &Path) -> Result<()> {
+        fs::rename(self.path(), destination).map_err(|e| IndexError::io(destination, e))?;
+        self.0 = None;
+        Ok(())
+    }
+}
 
 impl Drop for TempGuard {
     fn drop(&mut self) {
@@ -324,11 +342,8 @@ fn write_atomically(
 ) -> Result<u64> {
     static ZEROS: [u8; SECTION_ALIGN as usize] = [0; SECTION_ALIGN as usize];
 
-    let tmp = temp_path(path);
-    let mut guard = TempGuard(Some(tmp.clone()));
-    let io = |e| IndexError::io(&tmp, e);
-
-    let file = File::create(&tmp).map_err(io)?;
+    let (file, tmp) = TempGuard::create(path)?;
+    let io = |e| IndexError::io(tmp.path(), e);
     let mut w = BufWriter::with_capacity(1 << 20, file);
     w.write_all(&[0u8; HEADER_SIZE]).map_err(io)?;
 
@@ -357,8 +372,7 @@ fn write_atomically(
     }
     drop(file);
 
-    fs::rename(&tmp, path).map_err(|e| IndexError::io(path, e))?;
-    guard.0 = None;
+    tmp.rename(path)?;
     if sync {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             sync_dir(dir)?;

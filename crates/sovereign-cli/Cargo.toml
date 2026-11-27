@@ -15,6 +15,7 @@ name = "sovereign"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = { workspace = true }
 sovereign-core = { workspace = true }
 sovereign-index = { workspace = true }
 sovereign-pipeline = { workspace = true }

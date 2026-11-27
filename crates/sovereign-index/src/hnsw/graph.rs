@@ -108,7 +108,7 @@ impl<'a> HnswGraphRef<'a> {
         let node = node as usize;
         if layer == 0 {
             let w = self.m0 + 1;
-            return match self.layer0.get(node * w..node * w + w) {
+            return match self.layer0.chunks_exact(w).nth(node) {
                 Some(row) => &row[1..1 + (row[0] as usize).min(self.m0)],
                 None => &[],
             };
@@ -116,8 +116,8 @@ impl<'a> HnswGraphRef<'a> {
         match (self.levels.get(node), self.upper_index.get(node)) {
             (Some(&lvl), Some(&base)) if layer <= lvl as usize && base != u32::MAX => {
                 let w = self.m + 1;
-                let r = base as usize + layer - 1;
-                match self.upper.get(r * w..r * w + w) {
+                let Some(r) = (base as usize).checked_add(layer - 1) else { return &[] };
+                match self.upper.chunks_exact(w).nth(r) {
                     Some(row) => &row[1..1 + (row[0] as usize).min(self.m)],
                     None => &[],
                 }
@@ -231,6 +231,7 @@ mod tests {
         let bytes = AlignedVec::from_slice(&encode(&built));
         let g = HnswGraphRef::parse(&bytes, n).unwrap();
         assert_eq!(g.len(), n);
+        assert!(g.neighbors(u32::MAX, 0).is_empty());
         assert!(HnswGraphRef::parse(&bytes, n + 1).is_err());
 
         let space = Space::new(k, m, Metric::Cosine);

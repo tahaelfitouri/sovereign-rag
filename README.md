@@ -11,6 +11,9 @@ lock-free SPSC rings.
 > I'm now reviewing, testing, benchmarking, and extending the codebase module by module to understand
 > and own the system at the engineering level.
 
+**Historical benchmark snapshot.** These measurements predate the v0.1.0 release audit. They
+have not been reproduced on the release-preparation branch.
+
 ```text
 $ sovereign bench --dim 1536 --rows 20000 --queries 200        # median of 4 runs (min–max)
 Kernels · 1536-d · single core           ns/op             speedup vs naive scalar
@@ -82,40 +85,29 @@ Search · 20,000 × 1536-d · k=10
 
 ## Quick start
 
-```bash
-# Build (release profile: fat LTO, codegen-units=1)
-cargo build --release
-alias sovereign=./target/release/sovereign
+Use stable Rust with the platform's native build tools. Run these commands from the repository
+root in Bash or PowerShell. The first build downloads the locked dependencies.
 
-# What SIMD does this machine have?
-sovereign simd
-
-# Index a directory (Markdown, text and ~30 source-code extensions)
-sovereign ingest ./docs ./src --index .sovereign
-
-# Ask it something
-sovereign query -i .sovereign -k 5 "how are wakeups handled when the ring is full?"
-sovereign query -i .sovereign --exact --repeat 200 "cache line alignment"   # exact + p50/p99
-
-# Add more data (new segment, published atomically), inspect, compact
-sovereign ingest ./more-docs -i .sovereign
-sovereign info -i .sovereign
-sovereign compact -i .sovereign
-
-# Whole-system synthetic benchmark
-sovereign bench --dim 1536 --rows 50000 --queries 500
+```sh
+cargo build --release --locked -p sovereign-cli
+cargo run --release --locked -p sovereign-cli -- simd
+cargo run --release --locked -p sovereign-cli -- ingest ./docs --index .sovereign
+cargo run --release --locked -p sovereign-cli -- query -i .sovereign -k 5 "HNSW concurrent insert"
+cargo run --release --locked -p sovereign-cli -- info -i .sovereign
 ```
 
-Force a backend with `--simd avx2` or `SOVEREIGN_SIMD=scalar` (useful for A/B comparisons).
+The binary is `target/release/sovereign` on Unix and `target/release/sovereign.exe` on Windows.
+Add another directory with `ingest`, merge segments with `compact`, or use `query --exact` for an
+exact scan. Force a supported backend with `--simd avx2` or `--simd scalar`.
 
 > **About the embedder.** The bundled `HashEmbedder` is a deterministic *feature-hashing* model
 > (lowercased unigrams + bigrams hashed into signed buckets). It needs no GPU or download, which
 > makes the engine demonstrable end to end — but it measures **lexical** overlap, not meaning, and
 > hash collisions add noise. Real deployments implement the four-method
 > [`Embedder`](crates/sovereign-pipeline/src/embed.rs) trait for ONNX Runtime, candle,
-> llama.cpp or an HTTP API. The model's fingerprint is stored in every segment header and checked
-> at query time, so an index can never be queried with the wrong model. Pipeline throughput
-> numbers below are with the hash embedder; with a transformer, embedding dominates.
+> llama.cpp or an HTTP API. The CLI checks the embedder fingerprint against the store.
+> Library callers must supply query vectors from the same embedding model. The historical
+> ingestion measurements used the hash embedder.
 
 ### Library usage
 
@@ -186,10 +178,9 @@ for $d=1536$, AVX-512 with $k=4$: 24 + 6 = 30 terms of error growth instead of 1
 tests check every backend against an `f64` reference with tolerance $10^{-5}\sum|a_ib_i| + 10^{-6}$.
 
 **HNSW levels.** A node's top layer is drawn as $\ell = \lfloor -\ln(U)\cdot m_L \rfloor$ with
-$U \sim \mathcal{U}(0,1]$ and $m_L = 1/\ln M$, giving $P(\ell \ge l) = M^{-l}$. Expected search
-cost is $O(\log n)$ distance evaluations versus $O(n)$ for a flat scan — the only way to get
-sub-millisecond latency at scale, because a flat scan is bound by memory bandwidth
-(1M × 1536-d × 4 B = 6.1 GB per query).
+$U \sim \mathcal{U}(0,1]$ and $m_L = 1/\ln M$, giving $P(\ell \ge l) = M^{-l}$. HNSW search
+can visit far fewer nodes than a flat scan, depending on the graph, data, and beam width.
+A flat scan over 1M × 1536-d float vectors reads about 6.1 GB of vector data per query.
 
 ---
 
@@ -369,7 +360,7 @@ can never be lost between a failed `try_send` and parking. Memory ordering: slot
 | write to `.tmp` → `fsync` → `rename` → `fsync(dir)` | torn segments / manifests after a crash |
 | header CRC32, checked on every open (O(1)) | corrupted or foreign headers |
 | body CRC32, `Segment::verify()` / `OpenOptions::verify_checksum` | bit rot in vectors/graph/payloads |
-| manifest CRC32 + strict parser | tampered or truncated manifests |
+| manifest CRC32 + strict parser | accidental corruption or truncation |
 | embedder fingerprint in header + manifest | querying with a different model |
 | bounds checks on every file-derived index | UB from malicious or corrupt files |
 
@@ -377,11 +368,19 @@ can never be lost between a failed `try_send` and parking. Memory ordering: slot
 truncated underneath the process changes "immutable" memory or raises `SIGBUS`. Segments are
 immutable by protocol: written once under a temp name, published by atomic rename, never opened
 for writing again. Replacing a segment creates a new inode, so existing mappings are unaffected.
-External tampering with published files is outside the contract — the same stance as LMDB.
+Keep the index in a trusted local directory and keep published segment files immutable for as
+long as any process can hold a mapping. A checksum detects accidental corruption and provides
+no authentication. Coordinate cross-process opens with compaction. Reopen a stale store before
+writing. After a directory-sync error, inspect the store before retrying a write, since the new
+manifest may already be visible. Use the default sync behavior for durable writes on supported
+local filesystems. Ingested text and source paths can be retained in segment payloads.
 
 ---
 
 ## Benchmarks
+
+All tables below are historical. The release audit did not rerun the benchmarks. The reported
+latency, throughput, speedups, and recall are specific to the stated hosts, data, and commands.
 
 ### Criterion micro-benchmarks
 
@@ -497,8 +496,7 @@ sovereign query -i /tmp/idx -k 3 --repeat 20 --exact "memory mapped file advise 
 | exact scan (20 repeats of the same query) | p50 4.57 ms |
 | peak RSS (`VmHWM`) | 303.6 MiB |
 
-With a transformer embedder the pipeline is bound by the model, not by I/O, chunking or
-indexing; this run only shows that the rest of the engine adds little overhead around the model.
+Transformer throughput and pipeline overhead with a transformer remain unmeasured.
 
 ---
 
@@ -602,6 +600,7 @@ cargo +nightly miri test -p sovereign-core --lib                          # UB c
 
 The pre-merge review — unsafe inventory with per-block coverage, Miri results, storage/ring/recall
 analysis, and which checks ran locally vs only in CI — is in [`docs/REVIEW.md`](docs/REVIEW.md).
+See the [v0.1.0 release audit](docs/PUBLIC_RELEASE_AUDIT.md) for current verification and limitations.
 
 Highlights:
 
