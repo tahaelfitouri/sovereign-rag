@@ -2,8 +2,8 @@
 
 Audit performed on 2026-11-27 on `release/v0.1.0-preparation`.
 
-**Hold the release pending current Linux and Apple Silicon CI and a decision on identities in
-Git history.**
+**GO for public visibility based on the reviewed Git contents.** The release CI gate
+passed, and the repository owner approved public exposure of their existing commit email.
 The intended release is an early local retrieval engine for trusted index directories and
 document trees. The bundled embedder uses lexical feature hashing.
 
@@ -48,9 +48,12 @@ the native C compiler and GNU linker support. The final run used the portable LL
 | `cargo test --workspace --locked --offline` | 87 passed, including two doc tests. Zero failed or ignored. Cargo reported an existing unused `tokio-stream` dependency in the pipeline manifest. |
 | `git diff --check` | Passed |
 
-Linux, Apple Silicon/NEON, 32-bit targets, and the Rust 1.89 minimum-version check were
-unverified for this branch. The CI edits apply locked dependency resolution and read-only
-repository permissions. Remote CI did not run for this local branch.
+GitHub Actions passed **7 of 7 jobs** for release commit `c279f89`, whose tree matches
+`origin/main` at `75eea96`. The run covered Ubuntu with automatic, AVX2, and scalar dispatch,
+macOS 15 on Apple Silicon ARM64 with automatic dispatch and native NEON coverage,
+Rust 1.89 MSRV, formatting and Clippy, and benchmark compilation.
+The audit did not execute benchmarks or check 32-bit targets.
+[GitHub Actions run](https://github.com/tahaelfitouri/sovereign-rag/actions/runs/46022805204)
 
 ## Performance and licensing
 
@@ -69,16 +72,19 @@ review was outside this audit.
 
 ## Secrets and privacy
 
-Scanned the tracked worktree and 11 commits reachable from available refs and reflogs.
+The final lightweight review scanned 56 tracked files and 14 commits reachable from local
+refs, including the four fetched origin branches.
 Filename and text rules covered common credential filenames, private-key headers,
 provider-token formats, credential-bearing URLs, and common quoted secret assignments.
 No candidate credentials or sensitive filenames matched. This pattern-based scan cannot
-rule out arbitrary, encoded, binary, or revoked secrets. Remote-only history and local
-configuration outside tracked files were outside the scan.
+rule out arbitrary, encoded, binary, or revoked secrets. GitHub issues, PR discussions,
+Actions logs and artifacts, and local configuration outside Git were outside the scan.
 
-Three distinct author or committer email addresses do not use GitHub's noreply domain,
-and seven commit-message lines contain email-like data. Decide whether those identities may
-be exposed before publishing the history. This audit leaves history intact and omits values.
+The follow-up review identified one personal Outlook address, which appears only in author
+and committer metadata. On 2026-11-27, the repository owner approved public exposure of this
+existing address and directed that Git history and AI-assisted development attribution be
+preserved. The other flagged address is an automated Anthropic noreply address that appears
+in commit metadata and seven co-author trailers. This audit omits the address values.
 Generated indexes can embed document text and source paths. Keep them out of release artifacts.
 
 ## Remaining risks and release gates
@@ -96,6 +102,4 @@ Generated indexes can embed document text and source paths. Keep them out of rel
 - Parallel HNSW builds are nondeterministic, and approximate recall varies with data and
   parameters. Some invalid or extreme inputs can exhaust memory. Source trees should stay
   trusted and stable during ingestion. Discovery's size check precedes the file read.
-- Require current CI, including the Linux and Apple Silicon jobs, and resolve the Git history
-  privacy decision before public release. Fuzzing, Miri, sanitizers and concurrency model
-  checking were not rerun for this audit.
+- Fuzzing, Miri, sanitizers and concurrency model checking were not rerun for this audit.
