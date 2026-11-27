@@ -584,7 +584,7 @@ get 100% recall. The 1024-row threshold is a heuristic; it has not been tuned by
 quantization, a GPU searcher, a tree-sitter chunker and a `ratatui` TUI. The `VectorIndex` trait
 and `Embedder` trait are the seams those plug into. The NEON kernels are compile- and
 clippy-checked for `aarch64-unknown-linux-gnu` but have **not been executed** by the author; the CI
-workflow has a `macos-14` (Apple Silicon) job that runs them. All published numbers are x86_64.
+workflow has a `macos-15` (Apple Silicon ARM64) job that runs them. All published numbers are x86_64.
 
 ---
 

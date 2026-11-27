@@ -38,7 +38,7 @@ jobs:
           - { os: ubuntu-latest, simd: avx2 }
           - { os: ubuntu-latest, simd: scalar }
           # Apple Silicon: executes the NEON kernels natively.
-          - { os: macos-14, simd: auto }
+          - { os: macos-15, simd: auto }
     env:
       SOVEREIGN_SIMD: ${{ matrix.simd }}
     steps:
